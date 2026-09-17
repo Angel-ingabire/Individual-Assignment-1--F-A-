@@ -1,0 +1,5 @@
+library_tracker
+library_tracker.exe
+blockchain.dat
+signing_key.pem
+*.o
