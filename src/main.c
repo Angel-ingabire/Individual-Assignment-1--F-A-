@@ -1,4 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
+#if defined(__MINGW32__)
+#define __USE_MINGW_ANSI_STDIO 1
+#endif
 #include <openssl/evp.h>
 #include <openssl/ec.h>
 #include <openssl/err.h>
@@ -8,6 +11,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#define EVP_MD_CTX_new EVP_MD_CTX_create
+#define EVP_MD_CTX_free EVP_MD_CTX_destroy
+#endif
 
 #define MAX_BOOKS 500
 #define MAX_MEMBERS 500
@@ -359,7 +367,14 @@ static int validate_chain(const Chain *chain, EVP_PKEY *key, int print_result)
     for (size_t i = 0; valid && i < chain->count; i++)
     {
         const Block *block = &chain->items[i];
-        valid = hash_block(block, computed) && strcmp(computed, block->hash) == 0;
+        valid = block->index == (int)i && hash_block(block, computed) && strcmp(computed, block->hash) == 0;
+        if (i == 0)
+        {
+            char genesis_previous_hash[HASH_HEX_LENGTH];
+            memset(genesis_previous_hash, '0', 64);
+            genesis_previous_hash[64] = '\0';
+            valid = valid && strcmp(block->previous_hash, genesis_previous_hash) == 0;
+        }
         if (i > 0)
             valid = valid && strcmp(block->previous_hash, chain->items[i - 1].hash) == 0 && verify_signature(block, key);
         if (!valid && print_result)
@@ -384,6 +399,7 @@ static int book_on_loan(const Chain *chain, const char *book_id)
 static int append_transaction(Chain *chain, Book *book, Member *member, const char *action, EVP_PKEY *key)
 {
     Block *block;
+    char previous_hash[HASH_HEX_LENGTH];
     if (chain->count >= MAX_BLOCKS)
         return 0;
     block = &chain->items[chain->count];
@@ -395,7 +411,8 @@ static int append_transaction(Chain *chain, Book *book, Member *member, const ch
     snprintf(block->member_id, sizeof(block->member_id), "%s", member->member_id);
     snprintf(block->member_name, sizeof(block->member_name), "%s", member->full_name);
     snprintf(block->action, sizeof(block->action), "%s", action);
-    snprintf(block->previous_hash, sizeof(block->previous_hash), "%s", chain->items[chain->count - 1].hash);
+    memcpy(previous_hash, chain->items[chain->count - 1].hash, sizeof(previous_hash));
+    memcpy(block->previous_hash, previous_hash, sizeof(block->previous_hash));
     if (!sign_block(block, key))
         return 0;
     chain->count++;
@@ -421,7 +438,7 @@ static int authenticate(const char *path)
     FILE *file = fopen(path, "r");
     char username[64];
     char password[64];
-    char stored_user[64];
+    char stored_user[MAX_LINE];
     char stored_hash[HASH_HEX_LENGTH];
     char password_hash[HASH_HEX_LENGTH];
     int authenticated = 0;
@@ -476,7 +493,7 @@ int main(void)
 {
     BookRegistry books;
     MemberRegistry members;
-    Chain chain;
+    static Chain chain;
     EVP_PKEY *key;
     char line[MAX_LINE];
     if (!load_books("books.txt", &books) || !load_members("members.txt", &members))
@@ -497,8 +514,10 @@ int main(void)
     print_help();
     while (printf("library> ") && fgets(line, sizeof(line), stdin))
     {
-        char command[16], first[32], second[32];
+        char command[16] = {0}, first[32] = {0}, second[32] = {0};
         int fields = sscanf(line, "%15s %31s %31s", command, first, second);
+        if (fields == EOF || fields == 0)
+            continue;
         if (strcmp(command, "quit") == 0 || strcmp(command, "exit") == 0)
             break;
         if (strcmp(command, "help") == 0)
@@ -536,10 +555,15 @@ int main(void)
                 printf("ERROR: Book or Member not found.\n");
             else if (book_on_loan(&chain, book->book_id))
                 printf("ERROR: book is already on loan.\n");
-            else if (append_transaction(&chain, book, member, "BORROWED", key) && save_chain("blockchain.dat", &chain))
+            else if (!append_transaction(&chain, book, member, "BORROWED", key))
+                printf("ERROR: could not create borrow transaction.\n");
+            else if (save_chain("blockchain.dat", &chain))
                 printf("Borrow recorded in block %zu.\n", chain.count - 1);
             else
+            {
+                chain.count--;
                 printf("ERROR: could not persist borrow transaction.\n");
+            }
             continue;
         }
         if (strcmp(command, "return") == 0 && fields == 3)
@@ -550,10 +574,15 @@ int main(void)
                 printf("ERROR: Book or Member not found.\n");
             else if (!book_on_loan(&chain, book->book_id))
                 printf("ERROR: book has no active loan.\n");
-            else if (append_transaction(&chain, book, member, "RETURNED", key) && save_chain("blockchain.dat", &chain))
+            else if (!append_transaction(&chain, book, member, "RETURNED", key))
+                printf("ERROR: could not create return transaction.\n");
+            else if (save_chain("blockchain.dat", &chain))
                 printf("Return recorded in block %zu.\n", chain.count - 1);
             else
+            {
+                chain.count--;
                 printf("ERROR: could not persist return transaction.\n");
+            }
             continue;
         }
         printf("ERROR: invalid command or arguments.\n");

@@ -24,7 +24,15 @@ On MSYS2 MinGW64:
 pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-openssl make
 ```
 
-Use the **MSYS2 MinGW 64-bit** terminal so `gcc` can find OpenSSL.
+For the current MSYS2 UCRT64 environment, use:
+
+```sh
+pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-openssl mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+```
+
+Use the **MSYS2 UCRT64** terminal so `gcc` can find OpenSSL.
+
+On Windows PowerShell, install the same prerequisites with an administrator-enabled package manager, or install MSYS2 and use its **MinGW 64-bit** terminal. The compiler alone is not sufficient: the OpenSSL development package must provide both `openssl/*.h` and `libcrypto`.
 
 ## Build and run
 
@@ -36,7 +44,7 @@ make
 Alternatively, with CMake:
 
 ```sh
-cmake -S . -B build -G "MinGW Makefiles"
+cmake -S . -B build -G Ninja
 cmake --build build
 ./build/library_tracker
 ```
