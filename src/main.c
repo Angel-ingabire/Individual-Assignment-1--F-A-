@@ -250,7 +250,8 @@ static int sign_block(Block *block, EVP_PKEY *key)
     block_unsigned_data(block, data, sizeof(data));
     if (!context || EVP_DigestSignInit(context, NULL, EVP_sha256(), NULL, key) != 1 ||
         EVP_DigestSignUpdate(context, data, strlen(data)) != 1 ||
-        EVP_DigestSignFinal(context, block->signature, &signature_length) != 1 || signature_length > SIGNATURE_MAX_LENGTH)
+        EVP_DigestSignFinal(context, block->signature, &signature_length) != 1 ||
+        signature_length == 0 || signature_length > SIGNATURE_MAX_LENGTH)
     {
         EVP_MD_CTX_free(context);
         return 0;
@@ -367,16 +368,19 @@ static int validate_chain(const Chain *chain, EVP_PKEY *key, int print_result)
     for (size_t i = 0; valid && i < chain->count; i++)
     {
         const Block *block = &chain->items[i];
-        valid = block->index == (int)i && hash_block(block, computed) && strcmp(computed, block->hash) == 0;
+        valid = block->index == (int)i && block->signature_len <= SIGNATURE_MAX_LENGTH &&
+            hash_block(block, computed) && strcmp(computed, block->hash) == 0;
         if (i == 0)
         {
             char genesis_previous_hash[HASH_HEX_LENGTH];
             memset(genesis_previous_hash, '0', 64);
             genesis_previous_hash[64] = '\0';
-            valid = valid && strcmp(block->previous_hash, genesis_previous_hash) == 0;
+                valid = valid && strcmp(block->previous_hash, genesis_previous_hash) == 0 &&
+                    strcmp(block->action, "GENESIS") == 0;
         }
         if (i > 0)
-            valid = valid && strcmp(block->previous_hash, chain->items[i - 1].hash) == 0 && verify_signature(block, key);
+            valid = valid && (strcmp(block->action, "BORROWED") == 0 || strcmp(block->action, "RETURNED") == 0 || strcmp(block->action, "OVERDUE") == 0) &&
+                    strcmp(block->previous_hash, chain->items[i - 1].hash) == 0 && verify_signature(block, key);
         if (!valid && print_result)
             fprintf(stderr, "INVALID: block %d failed hash, link, or signature verification.\n", block->index);
     }
