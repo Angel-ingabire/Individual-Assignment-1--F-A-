@@ -92,5 +92,4 @@ This is an educational local ledger, not a distributed consensus network. In a p
 - `members.txt`: sample member registry
 - `users.txt`: sample hashed librarian credential
 - `DESIGN.md`: system design diagram and data flow
-- `REPORT.md`: technical report scaffold
 - `Makefile`: build and clean targets
