@@ -276,12 +276,12 @@ static int verify_signature(const Block *block, EVP_PKEY *key)
 
 static EVP_PKEY *load_or_create_key(const char *path)
 {
-    FILE *file = fopen(path, "rb");
+    BIO *file = BIO_new_file(path, "rb");
     EVP_PKEY *key = NULL;
     if (file)
     {
-        key = PEM_read_PrivateKey(file, NULL, NULL, NULL);
-        fclose(file);
+        key = PEM_read_bio_PrivateKey(file, NULL, NULL, NULL);
+        BIO_free(file);
         return key;
     }
     EVP_PKEY_CTX *context = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
@@ -290,16 +290,15 @@ static EVP_PKEY *load_or_create_key(const char *path)
         EVP_PKEY_CTX_free(context);
         return NULL;
     }
-    file = fopen(path, "wb");
-    if (!file || PEM_write_PrivateKey(file, key, NULL, NULL, 0, NULL, NULL) != 1)
+    file = BIO_new_file(path, "wb");
+    if (!file || PEM_write_bio_PrivateKey(file, key, NULL, NULL, 0, NULL, NULL) != 1)
     {
-        if (file)
-            fclose(file);
+        BIO_free(file);
         EVP_PKEY_free(key);
         EVP_PKEY_CTX_free(context);
         return NULL;
     }
-    fclose(file);
+    BIO_free(file);
     EVP_PKEY_CTX_free(context);
     printf("Created signing key at %s. Protect this file in production.\n", path);
     return key;
@@ -369,13 +368,13 @@ static int validate_chain(const Chain *chain, EVP_PKEY *key, int print_result)
     {
         const Block *block = &chain->items[i];
         valid = block->index == (int)i && block->signature_len <= SIGNATURE_MAX_LENGTH &&
-            hash_block(block, computed) && strcmp(computed, block->hash) == 0;
+                hash_block(block, computed) && strcmp(computed, block->hash) == 0;
         if (i == 0)
         {
             char genesis_previous_hash[HASH_HEX_LENGTH];
             memset(genesis_previous_hash, '0', 64);
             genesis_previous_hash[64] = '\0';
-                valid = valid && strcmp(block->previous_hash, genesis_previous_hash) == 0 &&
+            valid = valid && strcmp(block->previous_hash, genesis_previous_hash) == 0 &&
                     strcmp(block->action, "GENESIS") == 0;
         }
         if (i > 0)
