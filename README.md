@@ -85,6 +85,52 @@ Solo and pool mine all currently pending events. Cloud mining requires a duratio
 
 The account model starts each member at balance zero and nonce zero. Supply the sender's next nonce on `transfer`; `balances` prints it. Every transfer has a 1-token fee and is rejected for insufficient funds, unknown IDs, or a reused/incorrect nonce. In the UTXO model, transfers consume enough sender outputs, pay the same fee, and return any excess as change. `utxos` displays all currently unspent outputs. `history MEMBER_ID` prints the selected member's in-memory transaction history.
 
+## Configuration and testing
+
+Install GCC with C11 support and the OpenSSL 3 development headers and `libcrypto` library. For the Makefile build, install `make` as well. For the CMake build, install CMake 3.20 or newer and Ninja if using the commands below. The MSYS2 UCRT64 installation command is listed under [Dependencies](#dependencies).
+
+Build with either supported method:
+
+```sh
+make
+```
+
+or:
+
+```sh
+cmake -S . -B build -G Ninja
+cmake --build build
+```
+
+Choose the transaction model and proof-of-work difficulty when starting the program. The model remains active for that process; difficulty is the required number of leading zero hexadecimal characters in a block hash and must be from 1 to 4.
+
+```sh
+./library_tracker --model utxo --difficulty 2
+./library_tracker --model account --difficulty 4
+```
+
+To test mining, log in and queue at least one lending event before running a mining command. Replace the example IDs with an available book and registered member if the example book is already on loan:
+
+```text
+borrow BK001 ALU001
+pending
+mine solo
+view
+```
+
+`mine solo` confirms all pending lending events, prints hash attempts and the solo mining reward, and updates the selected token ledger after the chain is persisted. To test the other mining simulations, queue another valid event before each command:
+
+```text
+return BK001 ALU001
+mine pool
+borrow BK002 ALU002
+mine cloud 3
+```
+
+Pool mode displays each simulated miner's attempts, contribution percentage, reward after the 2% pool fee, and the fee. Cloud mode accepts 1 to 5 rounds and displays gross earnings, rental and maintenance fees, cumulative net earnings, and any unprofitable-round warnings. Cloud earnings are a simulation summary; they are not credited to member balances. Finish by checking `balances`, `utxos` (UTXO mode), and `validate`.
+
+To compare transaction models, exit and restart with the other `--model` value. Both models reconstruct confirmed member return rewards from the same persisted chain, but manual transfers and histories exist only in memory for the current run. Run the application from the project directory so it can find `books.txt`, `members.txt`, `users.txt`, and the chain/key files.
+
 Suggested demonstration:
 
 1. Log in and run `borrow BK001 ALU001`.
