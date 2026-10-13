@@ -1,5 +1,11 @@
 library_tracker
 library_tracker.exe
 blockchain.dat
+library_state.dat
+chain_metadata.dat
+token_state_*.dat
 signing_key.pem
+member_*_key.pem
+member_*_public.pem
 *.o
+*.tmp
