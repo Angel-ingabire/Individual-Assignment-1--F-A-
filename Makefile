@@ -1,11 +1,12 @@
 CC = gcc
 CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -O2
 LDLIBS = -lcrypto
+MODULES = $(wildcard src/*.h src/*.inc)
 
 all: library_tracker
 
-library_tracker: src/main.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
+library_tracker: src/main.c $(MODULES)
+	$(CC) $(CFLAGS) -o $@ src/main.c $(LDLIBS)
 
 clean:
-	rm -f library_tracker library_tracker.exe blockchain.dat signing_key.pem
+	rm -f library_tracker library_tracker.exe

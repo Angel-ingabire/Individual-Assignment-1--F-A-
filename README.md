@@ -14,7 +14,7 @@ A C11 library-lending ledger with ECDSA-signed records, copy-level inventory, FI
 - Mines up to eight signed lending records per block, ordered by overdue priority and then request time.
 - Computes a SHA-256 leaf hash for each record and builds each block's Merkle tree from scratch; validation recomputes every root.
 - Persists the chain, copy states, reservation queue, and pending requests in `blockchain.dat` and `library_state.dat`.
-- Persists mining difficulty and the configured block reward in `chain_metadata.dat`; a `--difficulty` argument overrides the stored difficulty for that run and updates it.
+- Persists mining difficulty, the configured block reward, and renewal period in `chain_metadata.dat`; a `--difficulty` argument overrides the stored difficulty for that run and updates it.
 - Persists each selected token model's balances, account nonces, UTXOs, transaction sequence, and transaction history in its own model-specific token-state file.
 - Revalidates the on-disk chain when `validate` is run; after a failed validation, the CLI blocks other commands until validation succeeds. Startup also checks persisted copy states against the latest confirmed and pending lending records.
 - Returns earn 10 gross tokens when returned by the recorded due date, or 5 gross tokens late. A 1-token transaction fee is deducted. Overdue records accrue one fine coin per day; an unreturned loan earns no reward.
@@ -113,6 +113,7 @@ member_nonce ALU001
 member_key ALU001
 difficulty_status
 set_difficulty 3
+set_renewal_days 21
 tamper
 help
 quit
@@ -142,6 +143,16 @@ cmake -S . -B build -G Ninja
 cmake --build build
 ```
 
+Run the isolated end-to-end smoke tests after building:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\smoke.ps1
+```
+
+The tests create and remove their own temporary data directory; they do not write to the checked-in blockchain or key files.
+
+`make clean` removes only generated executables; it intentionally preserves ledger, key, and library-state data.
+
 Choose the transaction model and proof-of-work difficulty when starting the program. The model remains active for that process; difficulty is the required number of leading zero hexadecimal characters in a block hash and must be from 1 to 4.
 
 ```sh
@@ -149,7 +160,7 @@ Choose the transaction model and proof-of-work difficulty when starting the prog
 ./library_tracker --model account --difficulty 4
 ```
 
-`set_difficulty 1-4` changes and persists difficulty during a session. `difficulty_status` displays the active difficulty and block reward. Fine settlement is entered as `settle_fine MEMBER_ID COPY_ID AMOUNT`; the signed payment is pending until a block is mined. Amounts are limited to the oldest unsettled fine for that copy; submit additional settlements for later fine periods separately. `set_condition COPY_ID MEMBER_ID NEW|GOOD|WORN REASON_CODE` queues a signed condition change. A multi-level downgrade is held as suspicious unless the reason starts with `OVERRIDE:`.
+`set_difficulty 1-4` changes and persists difficulty during a session. `set_renewal_days 1-3650` changes the renewal period and persists it in `chain_metadata.dat`; the default is 14 days. `difficulty_status` displays the active difficulty, block reward, and renewal period. Fine settlement is entered as `settle_fine MEMBER_ID COPY_ID AMOUNT`; the signed payment is pending until a block is mined. Amounts are limited to the oldest unsettled fine for that copy; submit additional settlements for later fine periods separately. `set_condition COPY_ID MEMBER_ID NEW|GOOD|WORN REASON_CODE` queues a signed condition change. A multi-level downgrade is held as suspicious unless the reason starts with `OVERRIDE:`.
 
 To test mining, log in and queue at least one lending event before running a mining command. Replace the example IDs with an available book and registered member if the example book is already on loan:
 
@@ -175,7 +186,7 @@ To compare transaction models, exit and restart with the other `--model` value. 
 
 Mining payout recipients and pool contribution details are stored in the model-specific token snapshot, not in block headers. If a token snapshot is deleted, return rewards and transfers can be replayed from the chain, but mining payouts cannot be reconstructed from the chain alone.
 
-`copies.txt` uses `copy_id,book_id,condition`, with condition `NEW`, `GOOD`, `WORN`, or `LOST`. The sample data includes multiple copies for some titles. `library_state.dat` preserves runtime copy changes, reservations, and pending requests across restarts. The fixed renewal period is 14 days and the maximum is two renewals per loan; adjust `RENEWAL_PERIOD_SECONDS` and `MAX_RENEWALS` in `src/main.c` to configure those policy values.
+`copies.txt` uses `copy_id,book_id,condition`, with condition `NEW`, `GOOD`, `WORN`, or `LOST`. The sample data includes multiple copies for some titles. `library_state.dat` preserves runtime copy changes, reservations, and pending requests across restarts. The renewal period defaults to 14 days and can be changed with `set_renewal_days`; the maximum is two renewals per loan.
 
 Suggested demonstration:
 
@@ -199,6 +210,8 @@ This is an educational local ledger, not a distributed consensus network. In a p
 ## Files
 
 - `src/main.c`: implementation
+- `src/types.h` and `src/*.inc`: shared types and feature-focused implementation modules, included into one translation unit
+- `tests/smoke.ps1`: isolated end-to-end smoke test (does not touch project ledger files)
 - `books.txt`: sample book registry
 - `copies.txt`: sample copy inventory
 - `members.txt`: sample member registry
@@ -207,6 +220,6 @@ This is an educational local ledger, not a distributed consensus network. In a p
 - `member_<ID>_public.pem`: generated member public key (ignored by git)
 - `token_state_*.dat`: model-specific persistent token ledger snapshots (ignored by git)
 - `DESIGN.md`: system design diagram and data flow
-- `TECHNICAL_REPORT.docx`: implementation, model comparison, mining methodology, tests, and evidence captures
-- `screenshots/`: rendered CLI-output evidence images embedded in the report
+- `TECHNICAL_REPORT.md`: implementation, model comparison, mining methodology, tests, and known limitations
+- `screenshots/`: rendered CLI-output evidence images
 - `Makefile`: build and clean targets
