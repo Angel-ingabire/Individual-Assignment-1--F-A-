@@ -10,12 +10,16 @@
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
+#include <ctype.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
 #define EVP_MD_CTX_new EVP_MD_CTX_create
@@ -52,6 +56,17 @@
 #define MAX_TRANSFER_OUTPUTS 2
 #define MAX_BLOCK_PAYOUTS MINERS_IN_POOL
 #define MINING_REWARD_SCALE 10000
+
+static int replace_file_atomically(const char *temporary_path,
+                                   const char *destination_path)
+{
+#if defined(_WIN32)
+    return MoveFileExA(temporary_path, destination_path,
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    return rename(temporary_path, destination_path) == 0;
+#endif
+}
 
 typedef struct
 {

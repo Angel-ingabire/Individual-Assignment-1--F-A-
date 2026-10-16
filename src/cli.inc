@@ -139,7 +139,6 @@ static void print_lending_history(const Chain *chain, const MemberRegistry *memb
 static int register_member(MemberRegistry *members, const char *member_id,
                            const char *full_name, const char *course_code)
 {
-    FILE *file;
     if (members->count >= MAX_MEMBERS ||
         !valid_identifier(member_id, sizeof(members->items[0].member_id)) ||
         !full_name[0] || strlen(full_name) >= sizeof(members->items[0].full_name) ||
@@ -147,16 +146,6 @@ static int register_member(MemberRegistry *members, const char *member_id,
         !valid_identifier(course_code, sizeof(members->items[0].course_code)) ||
         find_member(members, member_id))
         return 0;
-    file = fopen("members.txt", "a");
-    if (!file)
-        return 0;
-    {
-        int write_ok = fprintf(file, "%s,%s,%s\n", member_id, full_name, course_code) >= 0;
-        if (fclose(file) != 0)
-            write_ok = 0;
-        if (!write_ok)
-            return 0;
-    }
     snprintf(members->items[members->count].member_id, sizeof(members->items[0].member_id), "%s", member_id);
     snprintf(members->items[members->count].full_name, sizeof(members->items[0].full_name), "%s", full_name);
     snprintf(members->items[members->count].course_code, sizeof(members->items[0].course_code), "%s", course_code);
@@ -167,7 +156,6 @@ static int register_member(MemberRegistry *members, const char *member_id,
 static int register_book(BookRegistry *books, const char *book_id,
                          const char *title, const char *author)
 {
-    FILE *file;
     if (books->count >= MAX_BOOKS ||
         !valid_identifier(book_id, sizeof(books->items[0].book_id)) ||
         !title[0] || strlen(title) >= sizeof(books->items[0].title) ||
@@ -175,20 +163,65 @@ static int register_book(BookRegistry *books, const char *book_id,
         !valid_record_text(title) || !valid_record_text(author) ||
         strchr(title, ',') || strchr(author, ',') || find_book(books, book_id))
         return 0;
-    file = fopen("books.txt", "a");
-    if (!file)
-        return 0;
-    {
-        int write_ok = fprintf(file, "%s,%s,%s\n", book_id, title, author) >= 0;
-        if (fclose(file) != 0)
-            write_ok = 0;
-        if (!write_ok)
-            return 0;
-    }
     snprintf(books->items[books->count].book_id, sizeof(books->items[0].book_id), "%s", book_id);
     snprintf(books->items[books->count].title, sizeof(books->items[0].title), "%s", title);
     snprintf(books->items[books->count].author, sizeof(books->items[0].author), "%s", author);
     books->count++;
+    return 1;
+}
+
+static int save_member_registry(const char *path,
+                                const MemberRegistry *members)
+{
+    char temporary_path[512];
+    FILE *file;
+    int success = 1;
+    if (snprintf(temporary_path, sizeof(temporary_path), "%s.tmp", path) >=
+        (int)sizeof(temporary_path))
+        return 0;
+    file = fopen(temporary_path, "wb");
+    if (!file)
+        return 0;
+    for (size_t i = 0; success && i < members->count; i++)
+        success = fprintf(file, "%s,%s,%s\n", members->items[i].member_id,
+                          members->items[i].full_name,
+                          members->items[i].course_code) >= 0;
+    if (fflush(file) != 0)
+        success = 0;
+    if (fclose(file) != 0)
+        success = 0;
+    if (!success || !replace_file_atomically(temporary_path, path))
+    {
+        remove(temporary_path);
+        return 0;
+    }
+    return 1;
+}
+
+static int save_book_registry(const char *path, const BookRegistry *books)
+{
+    char temporary_path[512];
+    FILE *file;
+    int success = 1;
+    if (snprintf(temporary_path, sizeof(temporary_path), "%s.tmp", path) >=
+        (int)sizeof(temporary_path))
+        return 0;
+    file = fopen(temporary_path, "wb");
+    if (!file)
+        return 0;
+    for (size_t i = 0; success && i < books->count; i++)
+        success = fprintf(file, "%s,%s,%s\n", books->items[i].book_id,
+                          books->items[i].title,
+                          books->items[i].author) >= 0;
+    if (fflush(file) != 0)
+        success = 0;
+    if (fclose(file) != 0)
+        success = 0;
+    if (!success || !replace_file_atomically(temporary_path, path))
+    {
+        remove(temporary_path);
+        return 0;
+    }
     return 1;
 }
 
@@ -219,8 +252,12 @@ static int save_chain_metadata(const char *path, int difficulty, int renewal_day
         remove(temporary_path);
         return 0;
     }
-    remove(path);
-    return rename(temporary_path, path) == 0;
+    if (!replace_file_atomically(temporary_path, path))
+    {
+        remove(temporary_path);
+        return 0;
+    }
+    return 1;
 }
 
 static int load_chain_metadata(const char *path, int *difficulty,

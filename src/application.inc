@@ -1,3 +1,123 @@
+static int parse_cli_tokens(const char *line, char tokens[6][128],
+                            size_t *token_count)
+{
+    const unsigned char *cursor = (const unsigned char *)line;
+    *token_count = 0;
+    while (*cursor)
+    {
+        size_t length = 0;
+        size_t capacity;
+        while (*cursor && isspace(*cursor))
+            cursor++;
+        if (!*cursor)
+            break;
+        if (*token_count == 6)
+            return 0;
+        capacity = *token_count == 0 ? 32 : 128;
+        while (*cursor && !isspace(*cursor))
+        {
+            if (length + 1 >= capacity)
+                return 0;
+            tokens[*token_count][length++] = (char)*cursor++;
+        }
+        tokens[*token_count][length] = '\0';
+        (*token_count)++;
+    }
+    return 1;
+}
+
+static int cli_command_arity_valid(const char *command, int fields)
+{
+#define EXACT(name, count) (strcmp(command, name) == 0 && fields == count)
+#define RANGE(name, minimum, maximum) \
+    (strcmp(command, name) == 0 && fields >= minimum && fields <= maximum)
+    if (EXACT("quit", 1) || EXACT("exit", 1) || EXACT("help", 1) ||
+        EXACT("view", 1) || EXACT("validate", 1) ||
+        EXACT("validate_chain", 1) || EXACT("pending", 1) ||
+        EXACT("balances", 1) || EXACT("utxos", 1) ||
+        EXACT("utxo_view", 1) || EXACT("copies", 1) ||
+        EXACT("reservations", 1) ||
+        RANGE("view_fines", 1, 2) || EXACT("difficulty_status", 1) ||
+        EXACT("chain_save", 1) || EXACT("chain_load", 1) ||
+        EXACT("chain_view", 1) || EXACT("tamper", 1) ||
+        EXACT("lending_history", 1) || EXACT("fraud_review", 1) ||
+        EXACT("pool_view", 1))
+        return 1;
+    if (EXACT("register_member", 4) || EXACT("register_book", 4) ||
+        EXACT("reserve", 3) || EXACT("renew", 3) ||
+        EXACT("add_copy", 4) || EXACT("mark_lost", 4) ||
+        EXACT("settle_fine", 4))
+        return 1;
+    if (EXACT("borrow", 3) || EXACT("borrow", 4) ||
+        EXACT("return", 3) || EXACT("return", 4) ||
+        EXACT("overdue", 1) || EXACT("overdue", 2) ||
+        EXACT("check_overdue", 1) || EXACT("check_overdue", 2) ||
+        EXACT("copy", 2) || EXACT("view_copy", 2) ||
+        EXACT("view_book", 2) || EXACT("view_member", 2) ||
+        EXACT("member_nonce", 2) || EXACT("account_nonce", 2) ||
+        EXACT("member_key", 2) || EXACT("token_balance", 2) ||
+        EXACT("account_balance", 2) || EXACT("reservation_status", 2) ||
+        EXACT("approve_suspicious", 2) || EXACT("reject_suspicious", 2) ||
+        EXACT("member_history", 2) || EXACT("book_history", 2) ||
+        EXACT("history", 2) || EXACT("set_difficulty", 2) ||
+        EXACT("set_renewal_days", 2) || EXACT("set_condition", 5) ||
+        EXACT("transfer", 5) || EXACT("token_transfer", 5) ||
+        EXACT("account_transfer", 5) ||
+        EXACT("transaction_history", 2) ||
+        EXACT("mine_solo", 2) || RANGE("mine_pool", 3, 5) ||
+        EXACT("mine_cloud", 3))
+        return 1;
+    if (EXACT("mine", 3) || RANGE("mine", 4, 6))
+        return 1;
+    return 0;
+#undef EXACT
+#undef RANGE
+}
+
+static int discard_overlong_cli_line(const char *line)
+{
+    size_t length = strlen(line);
+    int character;
+    if (length > 0 && line[length - 1] == '\n')
+        return 0;
+    character = fgetc(stdin);
+    if (character == EOF || character == '\n')
+        return 0;
+    while (character != EOF && character != '\n')
+        character = fgetc(stdin);
+    return 1;
+}
+
+static LibraryState *begin_library_state_transaction(
+    const CopyRegistry *copies, const ReservationQueue *reservations,
+    const PendingPool *pending)
+{
+    LibraryState *candidate = (LibraryState *)malloc(sizeof(*candidate));
+    if (!candidate)
+        return NULL;
+    candidate->copies = *copies;
+    candidate->reservations = *reservations;
+    candidate->pending = *pending;
+    return candidate;
+}
+
+static int commit_library_state_transaction(
+    const char *path, LibraryState *candidate, CopyRegistry *copies,
+    ReservationQueue *reservations, PendingPool *pending)
+{
+    int saved = save_library_state(path, &candidate->copies,
+                                   &candidate->reservations,
+                                   &candidate->pending);
+    if (saved)
+    {
+        *copies = candidate->copies;
+        *reservations = candidate->reservations;
+        *pending = candidate->pending;
+    }
+    free(candidate);
+    return saved;
+}
+
 int main(int argc, char **argv)
 {
     BookRegistry books;
@@ -136,18 +256,49 @@ int main(int argc, char **argv)
     printf("Authenticated as librarian.\n");
     printf("Token model: %s | mining difficulty: %d leading zero(s)\n",
            model == MODEL_UTXO ? "UTXO" : "account", difficulty);
+    fflush(stdout);
     check_overdue(&chain, &pending, &copies, &books, &members, key, 1);
     if (!save_library_state("library_state.dat", &copies, &reservations, &pending))
         fprintf(stderr, "ERROR: overdue scan could not persist library state.\n");
     print_help();
-    while (printf("library> ") && fgets(line, sizeof(line), stdin))
+    while (printf("library> ") && fflush(stdout) != EOF &&
+           fgets(line, sizeof(line), stdin))
     {
         char command[32] = {0}, first[128] = {0}, second[128] = {0},
              third[128] = {0}, fourth[128] = {0}, fifth[128] = {0};
-        int fields = sscanf(line, "%31s %127s %127s %127s %127s %127s",
-                            command, first, second, third, fourth, fifth);
-        if (fields == EOF || fields == 0)
+        char tokens[6][128] = {{0}};
+        size_t token_count = 0;
+        int fields;
+        if (discard_overlong_cli_line(line))
+        {
+            fprintf(stderr, "ERROR: command line is too long; the entire line was discarded.\n");
             continue;
+        }
+        if (!parse_cli_tokens(line, tokens, &token_count))
+        {
+            fprintf(stderr, "ERROR: command has too many arguments or a token exceeds its length limit.\n");
+            continue;
+        }
+        fields = (int)token_count;
+        if (fields > 0)
+            snprintf(command, sizeof(command), "%s", tokens[0]);
+        if (fields > 1)
+            snprintf(first, sizeof(first), "%s", tokens[1]);
+        if (fields > 2)
+            snprintf(second, sizeof(second), "%s", tokens[2]);
+        if (fields > 3)
+            snprintf(third, sizeof(third), "%s", tokens[3]);
+        if (fields > 4)
+            snprintf(fourth, sizeof(fourth), "%s", tokens[4]);
+        if (fields > 5)
+            snprintf(fifth, sizeof(fifth), "%s", tokens[5]);
+        if (fields == 0)
+            continue;
+        if (!cli_command_arity_valid(command, fields))
+        {
+            printf("ERROR: invalid command or arguments.\n");
+            continue;
+        }
         if (strcmp(command, "mine_solo") == 0 && fields == 2)
         {
             char recipient[128];
@@ -207,29 +358,67 @@ int main(int argc, char **argv)
         }
         if (strcmp(command, "register_member") == 0 && fields == 4)
         {
-            if (ledger.account_count < MAX_MEMBERS &&
-                register_member(&members, first, second, third))
+            MemberRegistry candidate_members = members;
+            TokenLedger *candidate_ledger =
+                (TokenLedger *)malloc(sizeof(*candidate_ledger));
+            if (!candidate_ledger)
             {
-                if (!ensure_member_signing_key(&members, first) ||
-                    !add_ledger_member(&ledger, first))
-                    fprintf(stderr, "ERROR: member row was written, but key/account initialization failed; resolve before use.\n");
+                fprintf(stderr, "ERROR: could not stage member account registration.\n");
+                continue;
+            }
+            *candidate_ledger = ledger;
+            if (ledger.account_count >= MAX_MEMBERS ||
+                !register_member(&candidate_members, first, second, third))
+            {
+                active_member_registry = &members;
+                free(candidate_ledger);
+                printf("ERROR: member registration rejected; check fields, uniqueness, and registry capacity.\n");
+                continue;
+            }
+            active_member_registry = &candidate_members;
+            if (!ensure_member_signing_key(&candidate_members, first) ||
+                !add_ledger_member(candidate_ledger, first))
+            {
+                active_member_registry = &members;
+                free(candidate_ledger);
+                fprintf(stderr, "ERROR: member registration could not initialize its key or account; registry was unchanged.\n");
+            }
+            else if (!save_member_registry("members.txt", &candidate_members))
+            {
+                active_member_registry = &members;
+                free(candidate_ledger);
+                fprintf(stderr, "ERROR: member registry could not be persisted; registration was not applied.\n");
+            }
+            else if (!save_token_ledger(candidate_ledger, &chain))
+            {
+                if (!save_member_registry("members.txt", &members))
+                    fprintf(stderr, "ERROR: member token-state save failed and the prior registry could not be restored; repair members.txt before continuing.\n");
                 else
-                {
-                    if (!save_token_ledger(&ledger, &chain))
-                        fprintf(stderr, "ERROR: member registered but token ledger state was not persisted.\n");
-                    printf("Registered member %s. Names with spaces should be entered with underscores.\n", first);
-                }
+                    fprintf(stderr, "ERROR: member token-state save failed; registry was rolled back.\n");
+                active_member_registry = &members;
+                free(candidate_ledger);
             }
             else
-                printf("ERROR: member registration rejected; check fields, uniqueness, and registry capacity.\n");
+            {
+                members = candidate_members;
+                ledger = *candidate_ledger;
+                active_member_registry = &members;
+                free(candidate_ledger);
+                printf("Registered member %s. Names with spaces should be entered with underscores.\n", first);
+            }
             continue;
         }
         if (strcmp(command, "register_book") == 0 && fields == 4)
         {
-            if (register_book(&books, first, second, third))
+            BookRegistry candidate_books = books;
+            if (register_book(&candidate_books, first, second, third) &&
+                save_book_registry("books.txt", &candidate_books))
+            {
+                books = candidate_books;
                 printf("Registered book %s; add one or more physical copies with add_copy.\n", first);
+            }
             else
-                printf("ERROR: book registration rejected; check fields, uniqueness, and registry capacity.\n");
+                printf("ERROR: book registration rejected or could not be persisted; check fields, uniqueness, and registry capacity.\n");
             continue;
         }
         if ((strcmp(command, "view_member") == 0 || strcmp(command, "member_nonce") == 0 ||
@@ -318,33 +507,38 @@ int main(int argc, char **argv)
         if ((strcmp(command, "approve_suspicious") == 0 ||
              strcmp(command, "reject_suspicious") == 0) && fields == 2)
         {
-            PendingRequest *request = find_pending_request(&pending, first);
+            LibraryState *candidate = begin_library_state_transaction(
+                &copies, &reservations, &pending);
+            PendingRequest *request;
+            if (!candidate)
+            {
+                fprintf(stderr, "ERROR: could not stage suspicious-request review.\n");
+                continue;
+            }
+            request = find_pending_request(&candidate->pending, first);
             if (!request || request->status != REQUEST_SUSPICIOUS)
+            {
+                free(candidate);
                 printf("ERROR: suspicious request not found (ID must be unique).\n");
+            }
             else if (strcmp(command, "approve_suspicious") == 0)
             {
                 BookCopy *copy = NULL;
-                CopyState old_state = COPY_AVAILABLE;
-                char old_holder[20] = {0};
-                time_t old_due_date = 0;
-                unsigned int old_renewals = 0;
-                CopyCondition old_condition = COPY_GOOD;
+                char approved_id[HASH_HEX_LENGTH];
+                snprintf(approved_id, sizeof(approved_id), "%s",
+                         request->record.record_id);
                 if (strcmp(request->record.action, "BORROWED") == 0)
                 {
-                    copy = find_copy(&copies, request->record.copy_id);
+                    copy = find_copy(&candidate->copies, request->record.copy_id);
                     if (!copy ||
                         (copy->state != COPY_AVAILABLE &&
                          !(copy->state == COPY_RESERVED &&
                            strcmp(copy->current_holder_id, request->record.member_id) == 0)))
                     {
+                        free(candidate);
                         printf("ERROR: cannot approve; requested copy is no longer available to this member.\n");
                         continue;
                     }
-                    old_state = copy->state;
-                    snprintf(old_holder, sizeof(old_holder), "%s", copy->current_holder_id);
-                    old_due_date = copy->due_date;
-                    old_renewals = copy->renewal_count;
-                    old_condition = copy->condition;
                     copy->state = COPY_BORROWED;
                     snprintf(copy->current_holder_id, sizeof(copy->current_holder_id), "%s",
                              request->record.member_id);
@@ -353,43 +547,36 @@ int main(int argc, char **argv)
                 }
                 else if (strcmp(request->record.action, "CONDITION") == 0)
                 {
-                    copy = find_copy(&copies, request->record.copy_id);
+                    copy = find_copy(&candidate->copies, request->record.copy_id);
                     if (!copy || copy->state == COPY_STATE_LOST ||
                         request->record.fine_amount < COPY_NEW ||
                         request->record.fine_amount > COPY_WORN)
                     {
+                        free(candidate);
                         printf("ERROR: cannot approve; copy condition request is no longer valid.\n");
                         continue;
                     }
-                    old_condition = copy->condition;
                     copy->condition = (CopyCondition)request->record.fine_amount;
                 }
                 request->status = REQUEST_PENDING;
-                if (!save_library_state("library_state.dat", &copies, &reservations, &pending))
-                {
-                    request->status = REQUEST_SUSPICIOUS;
-                    if (copy)
-                    {
-                        copy->state = old_state;
-                        snprintf(copy->current_holder_id, sizeof(copy->current_holder_id), "%s", old_holder);
-                        copy->due_date = old_due_date;
-                        copy->renewal_count = old_renewals;
-                        copy->condition = old_condition;
-                    }
+                if (!commit_library_state_transaction(
+                        "library_state.dat", candidate, &copies,
+                        &reservations, &pending))
                     fprintf(stderr, "ERROR: approved request but failed to persist review decision.\n");
-                }
                 else
-                    printf("Approved request %s; it may now be mined.\n", request->record.record_id);
+                    printf("Approved request %s; it may now be mined.\n", approved_id);
             }
             else
             {
-                size_t index = (size_t)(request - pending.items);
+                size_t index = (size_t)(request - candidate->pending.items);
                 char rejected_id[HASH_HEX_LENGTH];
                 snprintf(rejected_id, sizeof(rejected_id), "%s", request->record.record_id);
-                for (size_t i = index + 1; i < pending.count; i++)
-                    pending.items[i - 1] = pending.items[i];
-                pending.count--;
-                if (!save_library_state("library_state.dat", &copies, &reservations, &pending))
+                for (size_t i = index + 1; i < candidate->pending.count; i++)
+                    candidate->pending.items[i - 1] = candidate->pending.items[i];
+                candidate->pending.count--;
+                if (!commit_library_state_transaction(
+                        "library_state.dat", candidate, &copies,
+                        &reservations, &pending))
                     fprintf(stderr, "ERROR: rejected request but failed to persist review decision.\n");
                 else
                     printf("Rejected and removed request %s.\n", rejected_id);
@@ -432,12 +619,28 @@ int main(int argc, char **argv)
                 printf("ERROR: provide a registered member, copy, and positive fine amount.\n");
             else
             {
-                check_overdue(&chain, &pending, &copies, &books, &members, key, 1);
-                if (queue_fine_settlement(&chain, &pending, &copies, &books, member,
+                LibraryState *candidate = begin_library_state_transaction(
+                    &copies, &reservations, &pending);
+                if (!candidate)
+                    fprintf(stderr, "ERROR: could not stage fine settlement.\n");
+                else
+                {
+                    check_overdue(&chain, &candidate->pending, &candidate->copies,
+                                  &books, &members, key, 1);
+                    if (queue_fine_settlement(&chain, &candidate->pending,
+                                              &candidate->copies, &books, member,
                                           second, (int)amount, key))
-                    print_pending(&pending);
-                if (!save_library_state("library_state.dat", &copies, &reservations, &pending))
-                    fprintf(stderr, "ERROR: could not persist fine settlement request.\n");
+                    {
+                        if (!commit_library_state_transaction(
+                                "library_state.dat", candidate, &copies,
+                                &reservations, &pending))
+                            fprintf(stderr, "ERROR: could not persist fine settlement; no state was changed.\n");
+                        else
+                            print_pending(&pending);
+                    }
+                    else
+                        free(candidate);
+                }
             }
             continue;
         }
@@ -596,18 +799,28 @@ int main(int argc, char **argv)
             char *nonce_end = NULL;
             long amount = strtol(third, &amount_end, 10);
             unsigned long long nonce = strtoull(fourth, &nonce_end, 10);
-            size_t previous_pending_count = pending.count;
             if (!amount_end || *amount_end || !nonce_end || *nonce_end ||
                 fourth[0] == '-' || amount <= 0 || amount > INT_MAX)
                 printf("ERROR: invalid transfer amount or nonce.\n");
-            else if (!queue_token_transfer(&chain, &pending, &ledger, &members,
-                                           first, second, (int)amount, nonce))
-                printf("ERROR: transfer rejected (unknown account, insufficient available balance, invalid nonce, or invalid amount).\n");
             else
             {
-                if (!save_library_state("library_state.dat", &copies, &reservations, &pending))
+                LibraryState *candidate = begin_library_state_transaction(
+                    &copies, &reservations, &pending);
+                if (!candidate)
                 {
-                    pending.count = previous_pending_count;
+                    fprintf(stderr, "ERROR: could not stage transfer request.\n");
+                    continue;
+                }
+                if (!queue_token_transfer(&chain, &candidate->pending, &ledger, &members,
+                                           first, second, (int)amount, nonce))
+                {
+                    free(candidate);
+                    printf("ERROR: transfer rejected (unknown account, insufficient available balance, invalid nonce, or invalid amount).\n");
+                }
+                else if (!commit_library_state_transaction(
+                             "library_state.dat", candidate, &copies,
+                             &reservations, &pending))
+                {
                     fprintf(stderr, "ERROR: queued transfer could not be persisted; request discarded.\n");
                 }
                 else
@@ -691,11 +904,23 @@ int main(int argc, char **argv)
             if (!book || !member)
                 printf("ERROR: Book or Member not found.\n");
             else
-                queue_borrow(&chain, &pending, &copies, book, member,
-                             fields == 4 ? third : NULL, key);
-            if (!save_library_state("library_state.dat", &copies, &reservations, &pending))
-                fprintf(stderr, "ERROR: could not persist borrow request.\n");
-            print_pending(&pending);
+            {
+                LibraryState *candidate = begin_library_state_transaction(
+                    &copies, &reservations, &pending);
+                if (!candidate)
+                    fprintf(stderr, "ERROR: could not stage borrow request.\n");
+                else
+                {
+                    queue_borrow(&chain, &candidate->pending, &candidate->copies,
+                                 book, member, fields == 4 ? third : NULL, key);
+                    if (!commit_library_state_transaction(
+                            "library_state.dat", candidate, &copies,
+                            &reservations, &pending))
+                        fprintf(stderr, "ERROR: could not persist borrow request; no state was changed.\n");
+                    else
+                        print_pending(&pending);
+                }
+            }
             continue;
         }
         if (strcmp(command, "return") == 0 && (fields == 3 || fields == 4))
@@ -705,11 +930,24 @@ int main(int argc, char **argv)
             if (!book || !member)
                 printf("ERROR: Book or Member not found.\n");
             else
-                queue_return(&chain, &pending, &copies, &reservations, book, member,
-                             fields == 4 ? third : NULL, key);
-            if (!save_library_state("library_state.dat", &copies, &reservations, &pending))
-                fprintf(stderr, "ERROR: could not persist return request.\n");
-            print_pending(&pending);
+            {
+                LibraryState *candidate = begin_library_state_transaction(
+                    &copies, &reservations, &pending);
+                if (!candidate)
+                    fprintf(stderr, "ERROR: could not stage return request.\n");
+                else
+                {
+                    queue_return(&chain, &candidate->pending, &candidate->copies,
+                                 &candidate->reservations, book, member,
+                                 fields == 4 ? third : NULL, key);
+                    if (!commit_library_state_transaction(
+                            "library_state.dat", candidate, &copies,
+                            &reservations, &pending))
+                        fprintf(stderr, "ERROR: could not persist return request; no state was changed.\n");
+                    else
+                        print_pending(&pending);
+                }
+            }
             continue;
         }
         if (strcmp(command, "reserve") == 0 && fields == 3)
@@ -719,10 +957,24 @@ int main(int argc, char **argv)
             if (!book || !member)
                 printf("ERROR: Book or Member not found.\n");
             else
-                queue_reservation(&chain, &pending, &reservations, &copies, book, member, key);
-            if (!save_library_state("library_state.dat", &copies, &reservations, &pending))
-                fprintf(stderr, "ERROR: could not persist reservation.\n");
-            print_reservations(&reservations);
+            {
+                LibraryState *candidate = begin_library_state_transaction(
+                    &copies, &reservations, &pending);
+                if (!candidate)
+                    fprintf(stderr, "ERROR: could not stage reservation.\n");
+                else
+                {
+                    queue_reservation(&chain, &candidate->pending,
+                                      &candidate->reservations,
+                                      &candidate->copies, book, member, key);
+                    if (!commit_library_state_transaction(
+                            "library_state.dat", candidate, &copies,
+                            &reservations, &pending))
+                        fprintf(stderr, "ERROR: could not persist reservation; no state was changed.\n");
+                    else
+                        print_reservations(&reservations);
+                }
+            }
             continue;
         }
         if (strcmp(command, "renew") == 0 && fields == 3)
@@ -733,16 +985,39 @@ int main(int argc, char **argv)
             if (!copy || !member || !book)
                 printf("ERROR: Copy or Member not found.\n");
             else
-                queue_renewal(&chain, &pending, &copies, &reservations, book, member, copy->copy_id, key);
-            if (!save_library_state("library_state.dat", &copies, &reservations, &pending))
-                fprintf(stderr, "ERROR: could not persist renewal.\n");
+            {
+                char copy_id[sizeof(copy->copy_id)];
+                LibraryState *candidate = begin_library_state_transaction(
+                    &copies, &reservations, &pending);
+                snprintf(copy_id, sizeof(copy_id), "%s", copy->copy_id);
+                if (!candidate)
+                    fprintf(stderr, "ERROR: could not stage renewal.\n");
+                else
+                {
+                    queue_renewal(&chain, &candidate->pending,
+                                  &candidate->copies, &candidate->reservations,
+                                  book, member, copy_id, key);
+                    if (!commit_library_state_transaction(
+                            "library_state.dat", candidate, &copies,
+                            &reservations, &pending))
+                        fprintf(stderr, "ERROR: could not persist renewal; no state was changed.\n");
+                }
+            }
             continue;
         }
         if ((strcmp(command, "overdue") == 0 || strcmp(command, "check_overdue") == 0) &&
             (fields == 1 || fields == 2))
         {
+            LibraryState *candidate = begin_library_state_transaction(
+                &copies, &reservations, &pending);
+            if (!candidate)
+            {
+                fprintf(stderr, "ERROR: could not stage overdue scan.\n");
+                continue;
+            }
             if (fields == 1)
-                check_overdue(&chain, &pending, &copies, &books, &members, key, 1);
+                check_overdue(&chain, &candidate->pending, &candidate->copies,
+                              &books, &members, key, 1);
             else
             {
                 BookCopy *copy = find_copy(&copies, first);
@@ -753,9 +1028,12 @@ int main(int argc, char **argv)
                 else
                     printf("Copy is overdue; accrued fine=%d.\n",
                            (int)(((time(NULL) - copy->due_date + 86399) / 86400) * FINE_PER_DAY));
-                check_overdue(&chain, &pending, &copies, &books, &members, key, 1);
+                check_overdue(&chain, &candidate->pending, &candidate->copies,
+                              &books, &members, key, 1);
             }
-            if (!save_library_state("library_state.dat", &copies, &reservations, &pending))
+            if (!commit_library_state_transaction(
+                    "library_state.dat", candidate, &copies,
+                    &reservations, &pending))
                 fprintf(stderr, "ERROR: could not persist overdue scan.\n");
             continue;
         }
@@ -766,11 +1044,28 @@ int main(int argc, char **argv)
             Member *librarian = find_member(&members, second);
             if (!book || !librarian)
                 printf("ERROR: Copy or librarian member ID not found.\n");
-            else if (queue_mark_lost(&chain, &pending, &copies, book, librarian,
-                                     copy->copy_id, third, key))
-                printf("Copy marked LOST; reason=%s. Record awaits mining.\n", third);
-            if (!save_library_state("library_state.dat", &copies, &reservations, &pending))
-                fprintf(stderr, "ERROR: could not persist lost-copy state.\n");
+            else
+            {
+                char copy_id[sizeof(copy->copy_id)];
+                LibraryState *candidate = begin_library_state_transaction(
+                    &copies, &reservations, &pending);
+                snprintf(copy_id, sizeof(copy_id), "%s", copy->copy_id);
+                if (!candidate)
+                    fprintf(stderr, "ERROR: could not stage lost-copy request.\n");
+                else if (queue_mark_lost(&chain, &candidate->pending,
+                                         &candidate->copies, book, librarian,
+                                         copy_id, third, key))
+                {
+                    if (!commit_library_state_transaction(
+                            "library_state.dat", candidate, &copies,
+                            &reservations, &pending))
+                        fprintf(stderr, "ERROR: could not persist lost-copy request; no state was changed.\n");
+                    else
+                        printf("Copy marked LOST; reason=%s. Record awaits mining.\n", third);
+                }
+                else
+                    free(candidate);
+            }
             continue;
         }
         if (strcmp(command, "set_condition") == 0 && fields == 5)
@@ -778,21 +1073,27 @@ int main(int argc, char **argv)
             BookCopy *copy = find_copy(&copies, first);
             Member *actor = find_member(&members, second);
             CopyCondition condition;
-            size_t previous_pending_count = pending.count;
-            CopyCondition previous_condition = copy ? copy->condition : COPY_GOOD;
             if (!copy || !actor || !parse_copy_condition(third, &condition))
                 printf("ERROR: provide a valid copy, registered librarian member ID, and NEW/GOOD/WORN condition.\n");
-            else if (queue_condition_change(&chain, &pending, &copies, &books, actor,
-                                           first, condition, fourth, key))
+            else
             {
-                if (!save_library_state("library_state.dat", &copies, &reservations, &pending))
+                LibraryState *candidate = begin_library_state_transaction(
+                    &copies, &reservations, &pending);
+                if (!candidate)
+                    fprintf(stderr, "ERROR: could not stage condition change.\n");
+                else if (queue_condition_change(
+                             &chain, &candidate->pending, &candidate->copies,
+                             &books, actor, first, condition, fourth, key))
                 {
-                    pending.count = previous_pending_count;
-                    copy->condition = previous_condition;
-                    fprintf(stderr, "ERROR: condition change was rolled back because state could not be persisted.\n");
+                    if (!commit_library_state_transaction(
+                            "library_state.dat", candidate, &copies,
+                            &reservations, &pending))
+                        fprintf(stderr, "ERROR: condition change was rolled back because state could not be persisted.\n");
+                    else
+                        print_pending(&pending);
                 }
                 else
-                    print_pending(&pending);
+                    free(candidate);
             }
             continue;
         }
@@ -805,26 +1106,38 @@ int main(int argc, char **argv)
                 printf("ERROR: copy registry is full or copy ID already exists.\n");
             else
             {
-                BookCopy *copy = &copies.items[copies.count++];
-                memset(copy, 0, sizeof(*copy));
-                snprintf(copy->copy_id, sizeof(copy->copy_id), "%s", first);
-                snprintf(copy->book_id, sizeof(copy->book_id), "%s", second);
-                if (strcmp(third, "NEW") == 0)
-                    copy->condition = COPY_NEW;
-                else if (strcmp(third, "GOOD") == 0)
-                    copy->condition = COPY_GOOD;
-                else if (strcmp(third, "WORN") == 0)
-                    copy->condition = COPY_WORN;
+                LibraryState *candidate = begin_library_state_transaction(
+                    &copies, &reservations, &pending);
+                if (!candidate)
+                    fprintf(stderr, "ERROR: could not stage new copy.\n");
                 else
                 {
-                    copies.count--;
-                    printf("ERROR: condition must be NEW, GOOD, or WORN.\n");
-                    continue;
+                    BookCopy *copy = &candidate->copies.items[
+                        candidate->copies.count++];
+                    memset(copy, 0, sizeof(*copy));
+                    snprintf(copy->copy_id, sizeof(copy->copy_id), "%s", first);
+                    snprintf(copy->book_id, sizeof(copy->book_id), "%s", second);
+                    if (strcmp(third, "NEW") == 0)
+                        copy->condition = COPY_NEW;
+                    else if (strcmp(third, "GOOD") == 0)
+                        copy->condition = COPY_GOOD;
+                    else if (strcmp(third, "WORN") == 0)
+                        copy->condition = COPY_WORN;
+                    else
+                    {
+                        candidate->copies.count--;
+                        free(candidate);
+                        printf("ERROR: condition must be NEW, GOOD, or WORN.\n");
+                        continue;
+                    }
+                    if (!commit_library_state_transaction(
+                            "library_state.dat", candidate, &copies,
+                            &reservations, &pending))
+                        fprintf(stderr, "ERROR: could not persist added copy; no state was changed.\n");
+                    else
+                        printf("Added copy %s.\n", first);
                 }
-                printf("Added copy %s.\n", first);
             }
-            if (!save_library_state("library_state.dat", &copies, &reservations, &pending))
-                fprintf(stderr, "ERROR: could not persist added copy.\n");
             continue;
         }
         printf("ERROR: invalid command or arguments.\n");

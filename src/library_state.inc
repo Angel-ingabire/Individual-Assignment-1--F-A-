@@ -32,7 +32,9 @@ static int save_library_state(const char *path, const CopyRegistry *copies,
     char temporary_path[512];
     FILE *file;
     int success;
-    snprintf(temporary_path, sizeof(temporary_path), "%s.tmp", path);
+    if (snprintf(temporary_path, sizeof(temporary_path), "%s.tmp", path) >=
+        (int)sizeof(temporary_path))
+        return 0;
     file = fopen(temporary_path, "wb");
     if (!file)
         return 0;
@@ -51,8 +53,12 @@ static int save_library_state(const char *path, const CopyRegistry *copies,
         remove(temporary_path);
         return 0;
     }
-    remove(path);
-    return rename(temporary_path, path) == 0;
+    if (!replace_file_atomically(temporary_path, path))
+    {
+        remove(temporary_path);
+        return 0;
+    }
+    return 1;
 }
 
 static int load_library_state(const char *path, CopyRegistry *copies,

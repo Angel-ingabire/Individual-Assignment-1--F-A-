@@ -174,6 +174,27 @@ static int pending_request_precedes(const PendingRequest *left, const PendingReq
     return left->reservation_date < right->reservation_date;
 }
 
+static void restore_ledger_snapshot(TokenLedger *ledger,
+                                    const TokenLedger *snapshot)
+{
+    size_t account_count = ledger->account_count;
+    if (account_count > snapshot->account_count)
+        account_count = snapshot->account_count;
+    for (size_t i = 0; i < account_count; i++)
+    {
+        TransactionRecord *entry = snapshot->accounts[i].history_tail
+                                       ? snapshot->accounts[i].history_tail->next
+                                       : ledger->accounts[i].history_head;
+        while (entry)
+        {
+            TransactionRecord *next = entry->next;
+            free(entry);
+            entry = next;
+        }
+    }
+    *ledger = *snapshot;
+}
+
 static int confirm_pending(Chain *chain, PendingPool *pending, CopyRegistry *copies,
                            ReservationQueue *reservations, TokenLedger *ledger,
                            const MemberRegistry *members, EVP_PKEY *key,
@@ -361,6 +382,8 @@ static int confirm_pending(Chain *chain, PendingPool *pending, CopyRegistry *cop
                 free(working_ledger);
                 return 0;
             }
+            snprintf(confirmed->token_model, sizeof(confirmed->token_model), "%s",
+                     working_ledger->model == MODEL_ACCOUNT ? "ACCOUNT" : "UTXO");
             if (strcmp(mode, "pool") == 0)
             {
                 unsigned long long total_attempts = 0;
@@ -475,6 +498,24 @@ static int confirm_pending(Chain *chain, PendingPool *pending, CopyRegistry *cop
             free(working_ledger);
             return 0;
         }
+        TokenLedger *ledger_snapshot =
+            (TokenLedger *)malloc(sizeof(*ledger_snapshot));
+        PendingPool *pending_snapshot =
+            (PendingPool *)malloc(sizeof(*pending_snapshot));
+        if (!ledger_snapshot || !pending_snapshot)
+        {
+            chain->count = old_count;
+            if (!save_chain(ledger_path, chain))
+                fprintf(stderr, "ERROR: failed to roll back chain after snapshot allocation failure.\n");
+            free(ledger_snapshot);
+            free(pending_snapshot);
+            free_ledger(working_ledger);
+            free(working_ledger);
+            fprintf(stderr, "ERROR: could not stage mining commit.\n");
+            return 0;
+        }
+        *ledger_snapshot = *ledger;
+        *pending_snapshot = *pending;
         for (size_t i = old_count; i < chain->count; i++)
         {
             for (size_t j = 0; j < chain->items[i].record_count; j++)
@@ -486,6 +527,13 @@ static int confirm_pending(Chain *chain, PendingPool *pending, CopyRegistry *cop
                     if (!apply_record_reward(ledger, record))
                     {
                         fprintf(stderr, "ERROR: confirmed return reward failed to apply; inspect chain and ledger backups.\n");
+                        restore_ledger_snapshot(ledger, ledger_snapshot);
+                        chain->count = old_count;
+                        if (!save_chain(ledger_path, chain))
+                            fprintf(stderr, "ERROR: failed to restore the prior chain after mining rollback.\n");
+                        *pending = *pending_snapshot;
+                        free(ledger_snapshot);
+                        free(pending_snapshot);
                         free_ledger(working_ledger);
                         free(working_ledger);
                         return 0;
@@ -500,6 +548,13 @@ static int confirm_pending(Chain *chain, PendingPool *pending, CopyRegistry *cop
                                           record->record_id, &record->utxo_proof))
                 {
                     fprintf(stderr, "ERROR: confirmed token transfer failed to apply; inspect chain and ledger backups.\n");
+                    restore_ledger_snapshot(ledger, ledger_snapshot);
+                    chain->count = old_count;
+                    if (!save_chain(ledger_path, chain))
+                        fprintf(stderr, "ERROR: failed to restore the prior chain after mining rollback.\n");
+                    *pending = *pending_snapshot;
+                    free(ledger_snapshot);
+                    free(pending_snapshot);
                     free_ledger(working_ledger);
                     free(working_ledger);
                     return 0;
@@ -516,6 +571,13 @@ static int confirm_pending(Chain *chain, PendingPool *pending, CopyRegistry *cop
             if (!apply_block_payouts(ledger, &chain->items[i]))
             {
                 fprintf(stderr, "ERROR: committed mining payout or cloud charge failed to apply; inspect chain and ledger backups.\n");
+                restore_ledger_snapshot(ledger, ledger_snapshot);
+                chain->count = old_count;
+                if (!save_chain(ledger_path, chain))
+                    fprintf(stderr, "ERROR: failed to restore the prior chain after mining rollback.\n");
+                *pending = *pending_snapshot;
+                free(ledger_snapshot);
+                free(pending_snapshot);
                 free_ledger(working_ledger);
                 free(working_ledger);
                 return 0;
@@ -539,12 +601,35 @@ static int confirm_pending(Chain *chain, PendingPool *pending, CopyRegistry *cop
         if (!save_library_state(state_path, copies, reservations, pending))
         {
             fprintf(stderr, "ERROR: confirmed chain but could not persist library state.\n");
+            restore_ledger_snapshot(ledger, ledger_snapshot);
+            chain->count = old_count;
+            if (!save_chain(ledger_path, chain))
+                fprintf(stderr, "ERROR: failed to restore the prior chain after mining rollback.\n");
+            *pending = *pending_snapshot;
+            free(ledger_snapshot);
+            free(pending_snapshot);
             free_ledger(working_ledger);
             free(working_ledger);
             return 0;
         }
         if (!save_token_ledger(ledger, chain))
-            fprintf(stderr, "ERROR: confirmed chain but could not persist token ledger; chain rewards will be replayed at next startup.\n");
+        {
+            fprintf(stderr, "ERROR: token snapshot could not be persisted; rolling back mining commit.\n");
+            restore_ledger_snapshot(ledger, ledger_snapshot);
+            chain->count = old_count;
+            if (!save_chain(ledger_path, chain))
+                fprintf(stderr, "ERROR: failed to restore the prior chain after mining rollback.\n");
+            *pending = *pending_snapshot;
+            if (!save_library_state(state_path, copies, reservations, pending))
+                fprintf(stderr, "ERROR: failed to restore the prior library state after mining rollback.\n");
+            free(ledger_snapshot);
+            free(pending_snapshot);
+            free_ledger(working_ledger);
+            free(working_ledger);
+            return 0;
+        }
+        free(ledger_snapshot);
+        free(pending_snapshot);
         free_ledger(working_ledger);
         free(working_ledger);
         if (strcmp(mode, "cloud") == 0)
