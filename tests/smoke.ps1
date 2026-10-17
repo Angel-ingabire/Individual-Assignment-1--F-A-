@@ -30,6 +30,7 @@ try {
     Push-Location $testRoot
     try {
         $overlongInput = 'x' * 300
+        $overlongCommand = 'x' * 32
         $previousErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try {
@@ -37,6 +38,7 @@ try {
                 'librarian',
                 'library2026',
                 'balances unexpected',
+                $overlongCommand,
                 $overlongInput,
                 'difficulty_status',
                 'set_renewal_days 0',
@@ -69,6 +71,7 @@ try {
         }
         Assert-OutputContains $utxoText 'renewal period=14 day(s)' 'Legacy metadata migration'
         Assert-OutputContains $utxoText 'ERROR: invalid command or arguments.' 'Extra CLI arguments'
+        Assert-OutputContains $utxoText 'ERROR: command has too many arguments or a token exceeds its length limit.' 'Overlong command token'
         Assert-OutputContains $utxoText 'ERROR: command line is too long; the entire line was discarded.' 'Overlong CLI input'
         Assert-OutputContains $utxoText 'ERROR: renewal period must be an integer from 1 to 3650 days.' 'Renewal validation'
         Assert-OutputContains $utxoText 'Renewal period set to 21 day(s).' 'Renewal configuration'

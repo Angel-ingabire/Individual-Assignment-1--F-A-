@@ -281,7 +281,15 @@ int main(int argc, char **argv)
         }
         fields = (int)token_count;
         if (fields > 0)
-            snprintf(command, sizeof(command), "%s", tokens[0]);
+        {
+            size_t command_length = strlen(tokens[0]);
+            if (command_length >= sizeof(command))
+            {
+                fprintf(stderr, "ERROR: command exceeds its length limit.\n");
+                continue;
+            }
+            memcpy(command, tokens[0], command_length + 1);
+        }
         if (fields > 1)
             snprintf(first, sizeof(first), "%s", tokens[1]);
         if (fields > 2)
